@@ -84,6 +84,39 @@ jobs:
             make defconfig
           fi
 
+      - name: Restore MT7992 WiFi7 chip config (fix FIRST_IF_NONE reset)
+        working-directory: immortalwrt
+        run: |
+          # make defconfig 会把 MTK_WIFI7 芯片选择重置为 FIRST_IF_NONE，
+          # 导致 CHIPSET 为空 -> mt_wifi.ko 不生成 -> kmod-mt_wifi7 打包失败。
+          # 在最终配置生效后强制回写芯片参数。
+          echo "=== Before fix ==="
+          grep -E "CONFIG_MTK_WIFI7_(FIRST_IF_NONE|FIRST_IF_MT7992|SECOND_IF_MT7992|CHIP_MT7992)" .config || true
+
+          sed -i '/^CONFIG_MTK_WIFI7_FIRST_IF_NONE=y/d' .config
+          sed -i '/^CONFIG_MTK_WIFI7_FIRST_IF_MT7992=/d' .config
+          sed -i '/^CONFIG_MTK_WIFI7_SECOND_IF_MT7992=/d' .config
+          sed -i '/^CONFIG_MTK_WIFI7_CHIP_MT7992=/d' .config
+          sed -i '/^CONFIG_MTK_WIFI7_DOT11_BE_SUPPORT=/d' .config
+          sed -i '/^CONFIG_MTK_WIFI7_UNIFIED_COMMAND=/d' .config
+
+          cat >> .config <<'EOF'
+          CONFIG_MTK_WIFI7_FIRST_IF_MT7992=y
+          CONFIG_MTK_WIFI7_SECOND_IF_MT7992=y
+          CONFIG_MTK_WIFI7_CHIP_MT7992=y
+          CONFIG_MTK_WIFI7_DOT11_BE_SUPPORT=y
+          CONFIG_MTK_WIFI7_UNIFIED_COMMAND=y
+          EOF
+
+          # 用 yes "" 代替 make defconfig，避免 Kconfig 再次重算覆盖芯片配置
+          yes "" | make oldconfig > /dev/null 2>&1 || true
+
+          echo "=== After fix ==="
+          grep -E "CONFIG_MTK_WIFI7_(FIRST_IF_NONE|FIRST_IF_MT7992|SECOND_IF_MT7992|CHIP_MT7992)" .config
+          echo "=== Verify ==="
+          test "$(grep -c '^CONFIG_MTK_WIFI7_FIRST_IF_MT7992=y' .config)" = "1" \
+            || { echo "ERROR: MT7992 chip config restore failed"; exit 1; }
+
       - name: Run post-build customization (diy-part2.sh)
         working-directory: immortalwrt
         run: |
