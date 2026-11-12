@@ -87,35 +87,57 @@ jobs:
       - name: Restore MT7992 WiFi7 chip config (fix FIRST_IF_NONE reset)
         working-directory: immortalwrt
         run: |
-          # make defconfig 会把 MTK_WIFI7 芯片选择重置为 FIRST_IF_NONE，
-          # 导致 CHIPSET 为空 -> mt_wifi.ko 不生成 -> kmod-mt_wifi7 打包失败。
-          # 在最终配置生效后强制回写芯片参数。
+          # make defconfig 会把 MTK_WIFI7 整组配置重置：
+          #   MT_WIFI=m          -> not set       => obj-$(CONFIG_MT_WIFI) 为空 => mt_wifi.ko 不生成
+          #   FIRST_IF_MT7992=y  -> FIRST_IF_NONE=y => CHIPSET 为空
+          # 结果 kmod-mt_wifi7 打包时报 "module mt_wifi.ko is missing"。
+          # 此处以 defconfig 的 MTK_WIFI7 全量配置为准，强制回写后再 oldconfig。
+
           echo "=== Before fix ==="
-          grep -E "CONFIG_MTK_WIFI7_(FIRST_IF_NONE|FIRST_IF_MT7992|SECOND_IF_MT7992|CHIP_MT7992)" .config || true
+          grep -E "^CONFIG_MTK_WIFI7_(MT_WIFI|MT_WIFI_PATH|CHIP_MT7992|FIRST_IF_MT7992|SECOND_IF_MT7992)=|^# CONFIG_MTK_WIFI7_(MT_WIFI|FIRST_IF_MT7992) is not set" .config || true
 
-          sed -i '/^CONFIG_MTK_WIFI7_FIRST_IF_NONE=y/d' .config
-          sed -i '/^CONFIG_MTK_WIFI7_FIRST_IF_MT7992=/d' .config
-          sed -i '/^CONFIG_MTK_WIFI7_SECOND_IF_MT7992=/d' .config
-          sed -i '/^CONFIG_MTK_WIFI7_CHIP_MT7992=/d' .config
-          sed -i '/^CONFIG_MTK_WIFI7_DOT11_BE_SUPPORT=/d' .config
-          sed -i '/^CONFIG_MTK_WIFI7_UNIFIED_COMMAND=/d' .config
+          # 1) 从 defconfig 提取所有 MTK_WIFI7 相关配置行（含 =y/=m/字符串/=数值）
+          grep -E "^CONFIG_MTK_WIFI7_[A-Z0-9_]+=" defconfig/mt7987_mt7992.config > /tmp/wifi7-forced.conf || true
+          # 2) 从 defconfig 提取明确未设置的项
+          grep -E "^# CONFIG_MTK_WIFI7_[A-Z0-9_]+ is not set" defconfig/mt7987_mt7992.config > /tmp/wifi7-unset.conf || true
 
-          cat >> .config <<'EOF'
-          CONFIG_MTK_WIFI7_FIRST_IF_MT7992=y
-          CONFIG_MTK_WIFI7_SECOND_IF_MT7992=y
-          CONFIG_MTK_WIFI7_CHIP_MT7992=y
-          CONFIG_MTK_WIFI7_DOT11_BE_SUPPORT=y
-          CONFIG_MTK_WIFI7_UNIFIED_COMMAND=y
-          EOF
+          echo "从 defconfig 提取 $(wc -l < /tmp/wifi7-forced.conf) 条 MTK_WIFI7 配置"
 
-          # 用 yes "" 代替 make defconfig，避免 Kconfig 再次重算覆盖芯片配置
+          # 3) 清掉 .config 中现有的 MTK_WIFI7 配置
+          sed -i '/^CONFIG_MTK_WIFI7_[A-Z0-9_]*=/d' .config
+          sed -i '/^# CONFIG_MTK_WIFI7_[A-Z0-9_]* is not set/d' .config
+
+          # 4) 回写 defconfig 的权威值
+          cat /tmp/wifi7-forced.conf >> .config
+          cat /tmp/wifi7-unset.conf >> .config 2>/dev/null || true
+
+          # 5) 用 oldconfig 收敛（不能用 defconfig，会再次重置）
           yes "" | make oldconfig > /dev/null 2>&1 || true
 
           echo "=== After fix ==="
-          grep -E "CONFIG_MTK_WIFI7_(FIRST_IF_NONE|FIRST_IF_MT7992|SECOND_IF_MT7992|CHIP_MT7992)" .config
+          grep -E "^CONFIG_MTK_WIFI7_(MT_WIFI|MT_WIFI_PATH|CHIP_MT7992|FIRST_IF_MT7992|SECOND_IF_MT7992)=|^# CONFIG_MTK_WIFI7_(MT_WIFI|FIRST_IF_MT7992) is not set" .config
+
+          # 6) 硬性校验：MT_WIFI 必须为 m（模块），芯片必须为 MT7992
           echo "=== Verify ==="
-          test "$(grep -c '^CONFIG_MTK_WIFI7_FIRST_IF_MT7992=y' .config)" = "1" \
-            || { echo "ERROR: MT7992 chip config restore failed"; exit 1; }
+          grep -q '^CONFIG_MTK_WIFI7_MT_WIFI=m' .config || { echo "FATAL: CONFIG_MTK_WIFI7_MT_WIFI=m 缺失"; exit 1; }
+          grep -q '^CONFIG_MTK_WIFI7_FIRST_IF_MT7992=y' .config || { echo "FATAL: FIRST_IF_MT7992 缺失"; exit 1; }
+          grep -q '^CONFIG_MTK_WIFI7_CHIP_MT7992=y' .config || { echo "FATAL: CHIP_MT7992 缺失"; exit 1; }
+          echo "OK: WiFi7 芯片配置已恢复"
+
+      - name: Drop duplicate ndisc6 from qmodem feed
+        working-directory: immortalwrt
+        run: |
+          # qmodem feed 与 mtk 5g-modem 各带一份 ndisc6，qmodem 版本在 aarch64 上
+          # rdisc6 二进制编译不出来，打包时报 install: cannot stat .../rdisc6。
+          # mtk 的 5g-modem/ndisc 版本可正常编译，因此禁用 qmodem 的重复包。
+          if [ -d feeds/qmodem/ndisc6 ]; then
+            echo "禁用 feeds/qmodem/ndisc6"
+            rm -rf feeds/qmodem/ndisc6
+          fi
+          # 同时从 .config 中移除以 feeds/qmodem 来源的 ndisc6 包选择
+          sed -i '/^CONFIG_PACKAGE_ndisc6=y/d' .config || true
+          sed -i '/^CONFIG_PACKAGE_rdisc6=y/d' .config || true
+          echo "ndisc6 去重完成"
 
       - name: Run post-build customization (diy-part2.sh)
         working-directory: immortalwrt
